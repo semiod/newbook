@@ -1,0 +1,446 @@
+#!/usr/bin/env perl
+#
+# mdbook-fix-templates
+# jms1 2022-04-05
+my $VERSION = 'v0.4.0 2025-12-12' ;
+#
+# Copy or update mdbook template files for "books".
+#
+# Previous versions of this script required that you have a copy of the
+# mdbook source code cloned on the machine where the script runs. This is no
+# longer necessary, the script now downloads the original template files
+# from the mdbook source code repo on Github.
+#
+###############################################################################
+#
+# MIT License
+#
+# Copyright (c) 2022-2025 John Simpson
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+###############################################################################
+
+require 5.005 ;
+use strict ;
+use warnings ;
+
+use Cwd qw 'abs_path cwd' ;
+use Getopt::Std ;
+use LWP::UserAgent ;
+
+########################################
+# Global variables
+
+my %opt         = () ;      # getopts
+my $do_backups  = 0 ;       # -b
+
+my $above_toc   = '' ;      # HTML fragment for above the ToC
+my $below_toc   = '' ;      # HTML fragment for below the ToC
+my $below_page  = '' ;      # HTML fragment for below the main page
+my $mdbook_ver  = '' ;      # mdbook version we're running
+
+########################################
+# URLs to download original templates from. The version will be substituted
+# where "_TAG_" appears in the value.
+
+my %ver_url     = (
+    'v0.4.' => 'https://raw.githubusercontent.com/rust-lang/mdBook/refs/tags/_TAG_/src/front-end/templates/' ,
+    'v0.5.' => 'https://raw.githubusercontent.com/rust-lang/mdBook/refs/tags/_TAG_/crates/mdbook-html/front-end/templates/' ,
+
+) ;
+
+###############################################################################
+#
+# Coloured line functions
+
+sub redline(@)
+{
+    printf "\e[0;1;37;41m%s\e[0K\e[0m\n" , join( ' ' , @_ ) ;
+}
+
+sub fail(@) {
+    redline( @_ ) ;
+    exit 1 ;
+}
+
+###############################################################################
+#
+# Usage
+
+sub usage(;$) {
+    my $msg = ( shift || '' ) ;
+
+    print <<EOF ;
+$0 [OPTIONS]
+$VERSION
+
+Copy or update mdbook templates files.
+
+This script must be run in a book's \"theme-template/\" directory.
+
+This script will download the original template files it needs from the mdbook
+source code repo on Github. They will be stored in the current directory, and
+
+-b      Create backups of each file before writing it.
+
+-h      Show this help message.
+
+EOF
+
+    if ( $msg ne '' )
+    {
+        fail( $msg ) ;
+    }
+
+    exit 0 ;
+}
+
+###############################################################################
+#
+# If a file exists, rename it to the same name with ".old" at the end
+
+sub rename_file_old($)
+{
+    my $file = shift ;
+
+    if ( $do_backups )
+    {
+        if ( -f $file )
+        {
+            print "renaming    $file to $file.old\n" ;
+
+            rename( $file , "$file.old" )
+                or fail( "ERROR: can't rename \"$file\" to \"$file.old\": $!\n" ) ;
+        }
+    }
+}
+
+###############################################################################
+#
+# Read a file's contents into a variable. If the file doesn't exist, return
+# an empty string.
+
+sub readfile_maybe($)
+{
+    my $file = shift ;
+    my $rv   = '' ;
+
+    print "reading     $file\n" ;
+
+    if ( -f $file )
+    {
+        open( my $fh , '<' , $file )
+            or fail( "ERROR: can't read \"$file\": $!\n" ) ;
+
+        local $/ ;
+        $rv = <$fh> ;
+
+        close $fh ;
+    }
+
+    return $rv ;
+}
+
+###############################################################################
+#
+# Get the output of a command
+
+sub command_output($)
+{
+    my $cmd = shift ;
+
+    open( my $fh , "$cmd |" )
+        or fail( "ERROR: '$cmd' failed: $!\n" ) ;
+
+    local $/ ;
+    my $text = <$fh> ;
+    close $fh ;
+
+    return $text ;
+}
+
+###############################################################################
+#
+# Return the contents of a template from the mdbook source
+# - possibly download it
+
+sub get_original_template($$)
+{
+    my $version = shift ;
+    my $file    = shift ;
+
+    ############################################################
+    # If the file already exists, return its contents
+
+    if ( -f "$version/$file" )
+    {
+        return readfile_maybe( "$version/$file" ) ;
+    }
+
+    ############################################################
+    # Need to download the file from Github
+
+    ########################################
+    # Figure out the URL to download
+
+    my $url = '' ;
+    for my $k ( sort keys %ver_url )
+    {
+        if ( $version =~ m|^$k| )
+        {
+            $url = $ver_url{$k} ;
+            last ;
+        }
+    }
+
+    if ( $url eq '' )
+    {
+        fail( "ERROR: don't know how to download templates for mdbook version $version" ) ;
+    }
+
+    $url =~ s|_TAG_|$version|g ;
+    $url =~ s|/?$|/$file| ;
+
+    ########################################
+    # Create the version's directory if it doesn't exist
+
+    if ( ! -d $version )
+    {
+        print "mkdir       $version\n" ;
+
+        mkdir( $version , 0755 )
+            or die "ERROR: mkdir('$version'): $!\n" ;
+    }
+
+    ########################################
+    # Download the file
+    # TODO: handle redirects
+
+    print "downloading $url\n" ;
+
+    my $ua = new LWP::UserAgent( "mdbook-fix-templates/$VERSION" ) ;
+    my $res = $ua->get( $url ) ;
+
+    if ( $res->code() !~ m|^2| )
+    {
+        print "ERROR: download failed\n" ;
+        print $res->status_line() , "\n" ;
+        exit 1 ;
+    }
+
+    my $rv = $res->content() ;
+
+    ########################################
+    # Save the file
+
+    print "writing     $version/$file\n" ;
+
+    open( my $fh , '>' , "$version/$file" )
+        or die "ERROR: can't write '$version/$file': $!\n" ;
+    print $fh $rv ;
+    close $fh ;
+
+    ########################################
+    # Return the cotent
+
+    return $rv ;
+}
+
+###############################################################################
+#
+# Update 'index.hbs' - template for main content area
+
+sub update_index_hbs()
+{
+    rename_file_old( 'index.hbs' ) ;
+
+    my $orig = get_original_template( $mdbook_ver , 'index.hbs' ) ;
+
+    print "writing     ./index.hbs\n" ;
+
+    open( my $o , '>' , "./index.hbs" )
+        or fail( "ERROR: can't write 'index.hbs': $!\n" ) ;
+
+    for my $line ( split( m|\n|s , $orig ) )
+    {
+        print $o "$line\n" ;
+
+        if ( $line =~ m|\{\{\{\s*content\s*\}\}\}| )
+        {
+            print $o $below_page ;
+        }
+    }
+
+    print $o "<!-- mdbook-fix-templates $VERSION - mdbook $mdbook_ver -->\n" ;
+
+    close $o ;
+}
+
+###############################################################################
+#
+# Update 'toc.html.hbs' - template for ToC without javascript
+
+sub update_toc_html_hbs()
+{
+    rename_file_old( 'toc.html.hbs' ) ;
+
+    my $orig = get_original_template( $mdbook_ver , 'toc.html.hbs' ) ;
+
+    print "writing     ./toc.html.hbs\n" ;
+
+    open( my $o , '>' , "./toc.html.hbs" )
+        or fail( "ERROR: can't write 'toc.html.hbs': $!\n" ) ;
+
+    for my $line ( split( m|\n|s , $orig ) )
+    {
+        if ( $line =~ m|\{\{\s*#toc\s*\}\}\s*\{\{\s*/toc\s*\}\}| )
+        {
+            print $o $above_toc , "$line\n" , $below_toc ;
+        }
+        else
+        {
+            print $o "$line\n" ;
+        }
+    }
+
+    print $o "<!-- mdbook-fix-templates $VERSION - mdbook $mdbook_ver -->\n" ;
+
+    close $o ;
+}
+
+###############################################################################
+#
+# Update 'toc.js.hbs' - template for ToC with javascript
+
+sub update_toc_js_hbs()
+{
+    rename_file_old( 'toc.js.hbs' ) ;
+
+    my $orig = get_original_template( $mdbook_ver , 'toc.js.hbs' ) ;
+
+    print "writing     ./toc.js.hbs\n" ;
+
+    open( my $o , '>' , "./toc.js.hbs" )
+        or fail( "ERROR: can't write 'toc.js.hbs': $!\n" ) ;
+
+    for my $line ( split( m|\n|s , $orig ) )
+    {
+        if ( $line =~ m|^(.*?)(\{\{\s*#toc\s*\}\}\s*\{\{\s*/toc\s*\}\})(.*?)$| )
+        {
+            my ( $before , $tags , $after ) = ( $1 , $2 , $3 ) ;
+
+            ########################################
+            # the javascript string where the items are being inserted must
+            # be a multi-line string (delimited by backticks)
+
+            $before =~ s|['"]$|`| ;
+            $after  =~ s|^['"]|`| ;
+
+            print $o "$before$above_toc$tags$below_toc$after\n" ;
+        }
+        else
+        {
+            print $o "$line\n" ;
+        }
+    }
+
+    print $o "\n// mdbook-fix-templates $VERSION - mdbook $mdbook_ver\n" ;
+
+    close $o ;
+}
+
+###############################################################################
+#
+# Get the URL of a repo's "origin" remote
+# - this may not work correctly if the "origin" remote has multiple URLs
+
+sub get_repo_origin($)
+{
+    my $dir = shift ;
+    my $url = '' ;
+
+    my $repo_config = readfile_maybe( "$dir/.git/config" ) ;
+
+    my $in_remote_origin = 0 ;
+    my @lines = split( /\n/ , $repo_config ) ;
+    while ( my $line = shift @lines )
+    {
+        if ( $line =~ m|^\[(.+?)\]| )
+        {
+            my $x = $1 ;
+            $in_remote_origin = ( $x eq 'remote "origin"' ) ;
+        }
+        elsif ( $in_remote_origin )
+        {
+            if ( $line =~ m|url\s*\=\s*(\S+)| )
+            {
+                $url = $1 ;
+            }
+        }
+    }
+
+    return $url ;
+}
+
+###############################################################################
+###############################################################################
+###############################################################################
+
+getopts( 'hb' , \%opt ) ;
+$opt{'h'} && usage() ;
+$do_backups = ( $opt{'b'} ? 1 : 0 ) ;
+
+###############################################################################
+#
+# Make sure the script is running in a book's "theme-template" directory.
+
+if ( abs_path( cwd() ) !~ m|/theme-template$| )
+{
+    usage( "ERROR: this script needs to run in a book's \"theme-template\" directory\n" ) ;
+}
+
+########################################
+# Figure out what version of mdbook we're running
+
+$mdbook_ver = command_output( 'mdbook --version' ) ;
+chomp $mdbook_ver ;
+$mdbook_ver =~ s|^mdbook || ;
+
+if ( $mdbook_ver eq '' )
+{
+    fail "ERROR: 'mdbook --version' failed: $!" ;
+}
+
+print "mdbook      $mdbook_ver\n" ;
+
+########################################
+# Read the HTML fragment files into memory
+# - if a file doesn't exist, readfile_mabye() returns an empty string
+
+$above_toc  = readfile_maybe( 'above-toc.html' ) ;
+$below_toc  = readfile_maybe( 'below-toc.html' ) ;
+$below_page = readfile_maybe( 'below-page.html' ) ;
+
+########################################
+# Modify and write the files
+
+update_index_hbs() ;
+update_toc_html_hbs() ;
+update_toc_js_hbs() ;

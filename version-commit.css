@@ -1,0 +1,24 @@
+/* Entire div containing commit info */
+
+.version-commit-div-l {
+    font-size   : 70% ;
+}
+
+.version-commit-div-r {
+    font-size   : 70% ;
+    text-align  : right ;
+}
+
+/* In case individual elements need to be customized */
+
+.version-commit-hash {
+}
+
+.version-commit-time {
+}
+
+.version-commit-now {
+}
+
+.version-commit-ver {
+}
