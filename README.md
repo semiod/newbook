@@ -592,4 +592,3 @@ Some files in this repo's `/theme-template/` directory may have been copied from
 
 Enjoy.
 
-*-jms1 2025-12-12*
